@@ -11,6 +11,7 @@ import org.opencv.android.Utils
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import kotlin.math.*
+import androidx.core.graphics.createBitmap
 
 class ImageProcessor(private val context: Context) {
 
@@ -194,20 +195,16 @@ class ImageProcessor(private val context: Context) {
 
             // Добавляем текст
             val text = "Лист A4 определен"
-            Imgproc.putText(
+            drawTextOnMat(
                 resultMat,
                 text,
                 Point(paperRect.x.toDouble(), paperRect.y.toDouble() - 10),
-                Imgproc.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                Scalar(255.0, 0.0, 0.0), // BGR: синий
-                2
+                24f, // размер текста
+                Scalar(0.0, 255.0, 255.0)
             )
 
             // Конвертируем обратно в Bitmap
-            val resultBitmap = Bitmap.createBitmap(
-                resultMat.width(), resultMat.height(), Bitmap.Config.ARGB_8888
-            )
+            val resultBitmap = createBitmap(resultMat.width(), resultMat.height())
             Utils.matToBitmap(resultMat, resultBitmap)
 
             return resultBitmap
@@ -215,7 +212,7 @@ class ImageProcessor(private val context: Context) {
         } catch (e: Exception) {
             Log.e("ImageProcessor", "Ошибка создания простого debug bitmap", e)
             // Возвращаем пустой Bitmap в случае ошибки
-            return Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply {
+            return createBitmap(100, 100).apply {
                 eraseColor(Color.RED)
             }
         }
@@ -243,19 +240,7 @@ class ImageProcessor(private val context: Context) {
 
             Log.d("ImageProcessor", "Каналы resultMat: ${resultMat.channels()}")
 
-            // 1. Рисуем прямоугольник листа (синий)
-            Imgproc.rectangle(
-                resultMat,
-                Point(paperRect.x.toDouble(), paperRect.y.toDouble()),
-                Point(
-                    (paperRect.x + paperRect.width).toDouble(),
-                    (paperRect.y + paperRect.height).toDouble()
-                ),
-                Scalar(255.0, 0.0, 0.0), // BGR: синий
-                3
-            )
-
-            // 2. Подготавливаем контур огурца в глобальных координатах
+            // Готовим контур огурца, чтобы знать его границы
             val globalContourPoints = mutableListOf<Point>()
             val localPoints = cucumberContour.toList()
 
@@ -271,10 +256,8 @@ class ImageProcessor(private val context: Context) {
             val globalContour = MatOfPoint()
             globalContour.fromList(globalContourPoints)
 
-            // 3. Создаем маску для заливки области огурца
+            // 1. Сначала заливаем область огурца ПОЛУПРОЗРАЧНЫМ зеленым
             val fillMask = Mat.zeros(resultMat.size(), CvType.CV_8UC1)
-
-            // Рисуем контур на маске (белым цветом)
             Imgproc.drawContours(
                 fillMask,
                 listOf(globalContour),
@@ -283,13 +266,33 @@ class ImageProcessor(private val context: Context) {
                 -1
             )
 
-            // 4. Создаем цветную заливку (зеленый)
-            val colorFill = Mat(resultMat.size(), resultMat.type(), Scalar(0.0, 255.0, 0.0))
+            // Создаем полупрозрачный зеленый цвет
+            val greenColor = Scalar(0.0, 255.0, 0.0) // Зеленый
+            val transparency = 0.5 // 50% непрозрачности
 
-            // 5. Применяем заливку только к области маски
-            colorFill.copyTo(resultMat, fillMask)
+            // Применяем полупрозрачную заливку
+            val tempMat = Mat()
+            resultMat.copyTo(tempMat)
 
-            // 6. Рисуем контур огурца (темно-зеленый) поверх заливки
+            val colorFill = Mat(resultMat.size(), resultMat.type(), greenColor)
+            colorFill.copyTo(tempMat, fillMask)
+
+            // Смешиваем с оригиналом для прозрачности
+            Core.addWeighted(tempMat, transparency, resultMat, 1 - transparency, 0.0, resultMat)
+
+            // 2. Теперь рисуем синий прямоугольник листа (ПОВЕРХ заливки)
+            Imgproc.rectangle(
+                resultMat,
+                Point(paperRect.x.toDouble(), paperRect.y.toDouble()),
+                Point(
+                    (paperRect.x + paperRect.width).toDouble(),
+                    (paperRect.y + paperRect.height).toDouble()
+                ),
+                Scalar(255.0, 0.0, 0.0), // BGR: синий
+                4 // Увеличиваем толщину
+            )
+
+            // 3. Рисуем контур огурца (темно-зеленый)
             Imgproc.drawContours(
                 resultMat,
                 listOf(globalContour),
@@ -298,31 +301,44 @@ class ImageProcessor(private val context: Context) {
                 3
             )
 
-            // 7. Рисуем ограничивающий прямоугольник (красный)
+            // 4. Рисуем ограничивающий прямоугольник (красный)
             val boundingRect = Imgproc.boundingRect(globalContour)
             Imgproc.rectangle(
                 resultMat,
                 boundingRect.tl(),
                 boundingRect.br(),
                 Scalar(0.0, 0.0, 255.0), // BGR: красный
-                2
+                3
             )
 
-            // 8. Добавляем текст с размерами
+            // 5. Добавляем текст с размерами (ИЗМЕНЯЕМ ПОЗИЦИЮ)
             val text = "ОГУРЕЦ"
+            // Размещаем текст выше прямоугольника, чтобы не перекрывался
+            val textY = max(30.0, boundingRect.y.toDouble() - 20.0)
             drawTextOnMat(
                 resultMat,
                 text,
-                Point(boundingRect.x.toDouble(), boundingRect.y.toDouble()),
+                Point(boundingRect.x.toDouble(), textY),
                 24f, // размер текста
-                Scalar(0.0, 255.0, 255.0)
+                Scalar(0.0, 255.0, 255.0) // Желтый
             )
 
-            // 9. Конвертируем обратно в Bitmap
-            val resultBitmap = Bitmap.createBitmap(
-                resultMat.width(), resultMat.height(), Bitmap.Config.ARGB_8888
+            // 6. Добавляем текст для листа A4
+            val sheetTextY = max(30.0, paperRect.y.toDouble() - 15.0)
+            drawTextOnMat(
+                resultMat,
+                "ЛИСТ А4",
+                Point(paperRect.x.toDouble(), sheetTextY),
+                20f,
+                Scalar(255.0, 0.0, 0.0) // Синий
             )
-            Utils.matToBitmap(resultMat, resultBitmap)
+
+            // 7. Конвертируем обратно в Bitmap
+            val resultBitmap = createBitmap(resultMat.width(), resultMat.height())
+            // Конвертируем BGR в RGBA для Android
+            val rgbaMat = Mat()
+            Imgproc.cvtColor(resultMat, rgbaMat, Imgproc.COLOR_BGR2RGBA)
+            Utils.matToBitmap(rgbaMat, resultBitmap)
 
             Log.d("ImageProcessor", "Debug bitmap создан успешно")
             resultBitmap
@@ -331,7 +347,7 @@ class ImageProcessor(private val context: Context) {
             Log.e("ImageProcessor", "Ошибка создания debug bitmap", e)
             e.printStackTrace()
             // Возвращаем простой красный Bitmap в случае ошибки
-            Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply {
+            createBitmap(100, 100).apply {
                 eraseColor(Color.RED)
             }
         }
@@ -339,7 +355,7 @@ class ImageProcessor(private val context: Context) {
 
     fun drawTextOnMat(mat: Mat, text: String, point: Point, textSizeZ: Float, color: Scalar) {
         // Создаем Bitmap из Mat
-        val bitmap = Bitmap.createBitmap(mat.cols(), mat.rows(), Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(mat.cols(), mat.rows())
         Utils.matToBitmap(mat, bitmap)
 
         val canvas = Canvas(bitmap)
@@ -412,37 +428,4 @@ class ImageProcessor(private val context: Context) {
         )
     }
 
-    /**
-     * Вспомогательная функция для конвертации MatOfPoint в список
-     */
-    private fun MatOfPoint.toList(): List<Point> {
-        val points = mutableListOf<Point>()
-        val total = this.total().toInt()
-
-        if (total > 0) {
-            val tempArray = this.toArray()
-            for (i in 0 until min(tempArray.size, total)) {
-                points.add(tempArray[i])
-            }
-        }
-
-        return points
-    }
-
-    /**
-     * Вспомогательная функция для получения массива из MatOfPoint
-     */
-    private fun MatOfPoint.toArray(): Array<Point> {
-        val total = this.total().toInt()
-        if (total == 0) return emptyArray()
-
-        val points = Array(total) { Point() }
-        for (i in 0 until total) {
-            val pointArray = this.get(i, 0)
-            if (pointArray.size >= 2) {
-                points[i] = Point(pointArray[0], pointArray[1])
-            }
-        }
-        return points
-    }
 }
