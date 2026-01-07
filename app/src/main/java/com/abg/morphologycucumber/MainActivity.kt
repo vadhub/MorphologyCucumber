@@ -1,6 +1,8 @@
 package com.abg.morphologycucumber
 
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.View
@@ -15,6 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.opencv.android.OpenCVLoader
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
 
@@ -23,6 +27,7 @@ class MainActivity : AppCompatActivity() {
 
     private var currentOriginalBitmap: Bitmap? = null
     private var currentDebugBitmap: Bitmap? = null
+    private var currentPhotoUri: Uri? = null
     private var showDebugView = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,7 +42,7 @@ class MainActivity : AppCompatActivity() {
             binding.resultText.text = "Ошибка: OpenCV не загружен"
         } else {
             Log.d("MainActivity", "OpenCV initialized successfully")
-            imageProcessor = ImageProcessor()
+            imageProcessor = ImageProcessor(this)
         }
 
         setupUI()
@@ -52,21 +57,68 @@ class MainActivity : AppCompatActivity() {
             analyzeImage()
         }
 
-        binding.btnRetry.setOnClickListener {
-            resetAnalysis()
-        }
-
         binding.btnToggleView.setOnClickListener {
             toggleDebugView()
         }
 
-        binding.btnHelp.setOnClickListener {
-            showHelpDialog()
+        binding.btnRetry.setOnClickListener {
+            resetAnalysis()
+        }
+
+        // Обработчик нажатия на область изображения
+        binding.imageHolder.setOnClickListener {
+            openFullscreenImage()
         }
 
         // Начальное состояние
         updateUIState(false, false)
         binding.btnToggleView.visibility = View.GONE
+        binding.tvViewMode.visibility = View.GONE
+    }
+
+    private fun openFullscreenImage() {
+        // Получаем текущее изображение (оригинал или отладочное)
+        val bitmap = if (showDebugView && currentDebugBitmap != null) {
+            currentDebugBitmap
+        } else {
+            currentOriginalBitmap
+        }
+
+        if (bitmap == null) {
+            Toast.makeText(this, "Нет изображения для просмотра", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Создаем временный файл для передачи изображения
+        val tempFile = createTempImageFile(bitmap)
+        if (tempFile != null) {
+            val intent = Intent(this, FullscreenImageActivity::class.java).apply {
+                putExtra("image_path", tempFile.absolutePath)
+                putExtra("is_debug", showDebugView && currentDebugBitmap != null)
+            }
+            startActivity(intent)
+        } else {
+            Toast.makeText(this, "Не удалось открыть изображение", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun createTempImageFile(bitmap: Bitmap): File? {
+        return try {
+            // Создаем временный файл в кэше
+            val cacheDir = cacheDir
+            val tempFile = File.createTempFile("temp_image_", ".jpg", cacheDir)
+
+            // Сохраняем Bitmap в файл
+            val outputStream = FileOutputStream(tempFile)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, outputStream)
+            outputStream.flush()
+            outputStream.close()
+
+            tempFile
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Ошибка создания временного файла", e)
+            null
+        }
     }
 
     private val cropImage = registerForActivityResult(CropImageContract()) { result ->
@@ -78,7 +130,12 @@ class MainActivity : AppCompatActivity() {
                     val compatibleBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
 
                     if (compatibleBitmap != null) {
+                        // Освобождаем старые битмапы
+                        currentOriginalBitmap?.recycle()
+                        currentDebugBitmap?.recycle()
+
                         currentOriginalBitmap = compatibleBitmap
+                        currentPhotoUri = result.uriContent
                         currentDebugBitmap = null
                         showDebugView = false
 
@@ -90,6 +147,7 @@ class MainActivity : AppCompatActivity() {
                         resetResultsUI()
                         binding.btnAnalyze.isEnabled = true
                         binding.btnToggleView.visibility = View.GONE
+                        binding.tvViewMode.visibility = View.GONE
 
                         showToast("Изображение загружено")
                     }
@@ -98,6 +156,8 @@ class MainActivity : AppCompatActivity() {
                 Log.e("MainActivity", "Ошибка загрузки изображения", e)
                 showToast("Ошибка загрузки изображения")
             }
+        } else {
+            showToast("Не удалось загрузить изображение")
         }
     }
 
@@ -138,11 +198,17 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
+                Log.d("MainActivity", "Начало анализа изображения")
+
                 val result = withContext(Dispatchers.IO) {
                     imageProcessor.processCucumberImage(bitmap)
                 }
 
+                Log.d("MainActivity", "Анализ завершен: ${result.measurements.error ?: "Успешно"}")
+
                 runOnUiThread {
+                    binding.progressBar.visibility = View.GONE
+
                     if (result.measurements.error != null) {
                         // Ошибка
                         binding.resultText.text = result.measurements.error
@@ -150,8 +216,9 @@ class MainActivity : AppCompatActivity() {
                         showToast("Ошибка анализа")
 
                         // Если есть debug bitmap, показываем его
-                        result.debugBitmap?.let { debugBitmap ->
-                            currentDebugBitmap = debugBitmap
+                        if (result.debugBitmap != null) {
+                            currentDebugBitmap?.recycle()
+                            currentDebugBitmap = result.debugBitmap
                             binding.btnToggleView.visibility = View.VISIBLE
                             toggleDebugView()
                         }
@@ -159,25 +226,29 @@ class MainActivity : AppCompatActivity() {
                         // Успех
                         displayResults(result)
                         updateUIState(false, true)
-                        showToast("Анализ завершен")
+                        showToast("Анализ завершен успешно")
 
                         // Сохраняем debug bitmap и показываем кнопку переключения
+                        currentDebugBitmap?.recycle()
                         currentDebugBitmap = result.debugBitmap
                         binding.btnToggleView.visibility = View.VISIBLE
                         toggleDebugView()
                     }
                 }
             } catch (e: Exception) {
+                Log.e("MainActivity", "Error analyzing image", e)
                 runOnUiThread {
-                    binding.resultText.text = "Ошибка: ${e.localizedMessage}"
-                    updateUIState(false, false)
-                    showToast("Ошибка анализа")
+                    binding.progressBar.visibility = View.GONE
+                    binding.resultText.text = "Ошибка анализа"
+                    binding.btnAnalyze.isEnabled = true
+                    binding.btnSelectImage.isEnabled = true
+                    showToast("Ошибка анализа изображения: ${e.message}")
                 }
             }
         }
     }
 
-    private fun displayResults(result: ImageProcessor.ProcessedResult) {
+    private fun displayResults(result: ProcessedResult) {
         // Основной текст с результатами
         val measurements = result.measurements
         binding.resultText.text = String.format(
@@ -208,6 +279,7 @@ class MainActivity : AppCompatActivity() {
             binding.imageView.setImageBitmap(currentDebugBitmap)
             binding.btnToggleView.text = "Показать оригинал"
             binding.tvViewMode.text = "Режим: Разметка"
+            binding.tvViewMode.visibility = View.VISIBLE
         } else {
             // Показываем оригинальное изображение
             currentOriginalBitmap?.let {
@@ -215,9 +287,8 @@ class MainActivity : AppCompatActivity() {
             }
             binding.btnToggleView.text = "Показать разметку"
             binding.tvViewMode.text = "Режим: Оригинал"
+            binding.tvViewMode.visibility = View.VISIBLE
         }
-
-        binding.tvViewMode.visibility = View.VISIBLE
     }
 
     private fun resetResultsUI() {
@@ -253,36 +324,13 @@ class MainActivity : AppCompatActivity() {
         binding.btnToggleView.isEnabled = hasResults || currentDebugBitmap != null
     }
 
-    private fun showHelpDialog() {
-        val message = """
-            Как правильно фотографировать:
-            
-            1. Положите огурец на чистый белый лист А4
-            2. Сделайте фото сверху при хорошем освещении
-            3. Убедитесь, что весь лист виден в кадре
-            4. Огурец должен быть контрастным на фоне листа
-            5. Избегайте теней и бликов
-            
-            После анализа:
-            • Нажмите "Показать разметку" чтобы увидеть область огурца
-            • Зеленым контуром выделен огурец
-            • Синим прямоугольником выделен лист А4
-            • Красным прямоугольником - границы огурца
-        """.trimIndent()
-
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Инструкция")
-            .setMessage(message)
-            .setPositiveButton("Понятно") { dialog, _ -> dialog.dismiss() }
-            .show()
-    }
-
     private fun showToast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        // Освобождение ресурсов
         currentOriginalBitmap?.recycle()
         currentDebugBitmap?.recycle()
     }

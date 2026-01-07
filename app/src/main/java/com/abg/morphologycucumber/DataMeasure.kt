@@ -1,9 +1,8 @@
 package com.abg.morphologycucumber
 
+import android.graphics.Bitmap
 import org.opencv.core.MatOfPoint
-import org.opencv.core.Point
 import org.opencv.core.Rect
-import org.opencv.core.RotatedRect
 
 /**
  * Результат измерения огурца
@@ -16,12 +15,12 @@ data class MeasurementResult(
     val error: String? = null // Сообщение об ошибке, если есть
 )
 
-
 /**
  * Анализ контура огурца
  */
-data class ContourAnalysis(
-    val rotatedRect: RotatedRect,
-    val boundingRect: Rect,
-    val area: Double
+data class ProcessedResult(
+    val measurements: MeasurementResult,
+    val cucumberContour: MatOfPoint? = null,
+    val paperRect: Rect? = null,
+    val debugBitmap: Bitmap? = null
 )

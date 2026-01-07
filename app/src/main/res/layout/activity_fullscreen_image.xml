@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <!-- Панель управления -->
+    <RelativeLayout
+        android:id="@+id/controlPanel"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:background="#80000000"
+        android:paddingHorizontal="16dp"
+        android:layout_alignParentTop="true">
+
+        <ImageView
+            android:id="@+id/fullscreenBackButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_centerVertical="true"
+            android:src="@android:drawable/ic_menu_revert"
+            android:contentDescription="Назад"
+            app:tint="@android:color/white" />
+
+        <TextView
+            android:id="@+id/fullscreenFileName"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerInParent="true"
+            android:textColor="@android:color/white"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <ImageView
+            android:id="@+id/fullscreenCloseButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_alignParentEnd="true"
+            android:layout_centerVertical="true"
+            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            android:contentDescription="Закрыть"
+            app:tint="@android:color/white" />
+
+    </RelativeLayout>
+
+    <!-- Изображение -->
+    <ImageView
+        android:id="@+id/fullscreenImageView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_below="@id/controlPanel"
+        android:layout_above="@id/infoPanel"
+        android:scaleType="fitCenter"
+        android:contentDescription="Полноэкранное изображение" />
+
+    <!-- Панель информации -->
+    <RelativeLayout
+        android:id="@+id/infoPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:background="#80000000"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/fullscreenInfoText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            android:text="Информация о изображении" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentEnd="true"
+            android:textColor="#80FFFFFF"
+            android:textSize="12sp"
+            android:text="Касание для скрытия/показа панелей" />
+
+    </RelativeLayout>
+
+    <!-- Индикатор загрузки -->
+    <ProgressBar
+        android:id="@+id/fullscreenProgressBar"
+        style="?android:attr/progressBarStyleLarge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_centerInParent="true"
+        android:visibility="gone" />
+
+</RelativeLayout>
