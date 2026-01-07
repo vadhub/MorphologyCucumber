@@ -22,12 +22,28 @@
             android:layout_marginBottom="24dp"/>
 
         <!-- Кнопки действий -->
-        <Button
-            android:id="@+id/btnSelectImage"
+        <LinearLayout
+            android:orientation="horizontal"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Выбрать изображение"
-            android:layout_marginBottom="16dp"/>
+            android:layout_height="wrap_content">
+
+            <Button
+                android:id="@+id/btnSelectImage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Выбрать изображение"
+                android:layout_marginBottom="16dp"
+                android:layout_weight="1"/>
+
+            <Button
+                android:id="@+id/btnHelp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="?"
+                android:textSize="18sp"
+                android:minWidth="48dp" />
+
+        </LinearLayout>
 
         <!-- Область изображения -->
         <FrameLayout
@@ -189,12 +205,30 @@
 
         </LinearLayout>
 
+        <TextView
+            android:id="@+id/tvViewMode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="Режим: Оригинал"
+            android:textSize="14sp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone"/>
+
         <!-- Кнопки действий с результатами -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:layout_marginTop="8dp">
+
+            <Button
+                android:id="@+id/btnToggleView"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Разметка"
+                android:layout_marginEnd="8dp"/>
 
             <Button
                 android:id="@+id/btnSaveResults"

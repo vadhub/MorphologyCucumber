@@ -12,15 +12,32 @@ class ImageProcessor {
     companion object {
         private const val A4_WIDTH_MM = 210f
         private const val A4_HEIGHT_MM = 297f
-        private const val CONTOUR_APPROX_EPSILON = 0.02
     }
 
-    fun processCucumberImage(bitmap: Bitmap): MeasurementResult {
+    data class MeasurementResult(
+        val length: Float,
+        val width: Float,
+        val diameter: Float,
+        val volume: Float,
+        val error: String? = null
+    )
+
+    data class ProcessedResult(
+        val measurements: MeasurementResult,
+        val cucumberContour: MatOfPoint? = null,
+        val paperRect: Rect? = null,
+        val debugBitmap: Bitmap? = null
+    )
+
+    fun processCucumberImage(bitmap: Bitmap): ProcessedResult {
         return try {
             Log.d("ImageProcessor", "Начало обработки изображения")
 
             if (bitmap.isRecycled) {
-                return MeasurementResult(0f, 0f, 0f, 0f, "Изображение не доступно")
+                return ProcessedResult(
+                    MeasurementResult(0f, 0f, 0f, 0f, "Изображение не доступно"),
+                    null, null, null
+                )
             }
 
             // Конвертируем в ARGB_8888 если нужно
@@ -31,284 +48,291 @@ class ImageProcessor {
             }
 
             if (compatibleBitmap == null) {
-                return MeasurementResult(0f, 0f, 0f, 0f, "Не удалось преобразовать изображение")
+                return ProcessedResult(
+                    MeasurementResult(0f, 0f, 0f, 0f, "Не удалось преобразовать изображение"),
+                    null, null, null
+                )
             }
 
             // 1. Конвертируем Bitmap в Mat
             val srcMat = Mat()
             Utils.bitmapToMat(compatibleBitmap, srcMat)
-            Log.d("ImageProcessor", "Изображение загружено: ${srcMat.width()}x${srcMat.height()}")
 
-            // 2. Детектируем лист A4
-            val paperContour = detectPaperContourImproved(srcMat)
-            Log.d("ImageProcessor", "Контур листа найден: ${!paperContour.empty()}")
+            // 2. Находим лист A4 (простой метод - по краям)
+            val paperRect = findPaperRectSimple(srcMat)
+            Log.d("ImageProcessor", "Найден прямоугольник листа: $paperRect")
 
-            if (paperContour.empty()) {
-                return MeasurementResult(0f, 0f, 0f, 0f, "Не удалось найти лист A4. Убедитесь, что:\n1. Лист полностью виден\n2. Лист на светлом фоне\n3. Нет сильных бликов")
+            if (paperRect.width <= 0 || paperRect.height <= 0) {
+                return ProcessedResult(
+                    MeasurementResult(0f, 0f, 0f, 0f, "Не удалось определить лист A4"),
+                    null, null, null
+                )
             }
 
             // 3. Получаем масштаб
-            val scale = calculateScaleImproved(paperContour)
-            Log.d("ImageProcessor", "Масштаб: $scale пикс/мм")
+            val scale = calculateScaleFromRect(paperRect)
+            Log.d("ImageProcessor", "Масштаб: $scale")
 
-            if (scale <= 0.5f) {
-                return MeasurementResult(0f, 0f, 0f, 0f, "Масштаб слишком мал. Сфотографируйте ближе")
+            // 4. Обрезаем до области листа
+            val paperRegion = Mat(srcMat, paperRect)
+
+            // 5. Ищем огурец
+            val cucumberContour = findCucumberWithVisualization(paperRegion)
+
+            if (cucumberContour.first.empty()) {
+                return ProcessedResult(
+                    MeasurementResult(0f, 0f, 0f, 0f, "Не удалось найти огурец"),
+                    null, null, createDebugBitmap(srcMat, paperRect, MatOfPoint())
+                )
             }
 
-            // 4. Обрезаем изображение до области листа
-            val paperRegion = cropToPaper(srcMat, paperContour)
+            // 6. Вычисляем измерения
+            val measurements = calculateMeasurements(cucumberContour.first, scale)
 
-            // 5. Детектируем огурец
-            val cucumberContour = detectCucumber(paperRegion)
-            Log.d("ImageProcessor", "Контур огурца найден: ${!cucumberContour.empty()}")
+            // 7. Создаем Bitmap с визуализацией
+            val debugBitmap = createDebugBitmap(srcMat, paperRect, cucumberContour.first, cucumberContour.second)
 
-            if (cucumberContour.empty()) {
-                return MeasurementResult(0f, 0f, 0f, 0f, "Не удалось найти огурец. Убедитесь, что:\n1. Огурец на белом листе\n2. Контрастный фон\n3. Хорошее освещение")
-            }
-
-            // 6. Анализируем и вычисляем
-            val measurements = calculateMeasurements(cucumberContour, scale)
-            measurements
+            // 8. Возвращаем результат
+            ProcessedResult(
+                measurements,
+                cucumberContour.first,
+                paperRect,
+                debugBitmap
+            )
 
         } catch (e: Exception) {
             Log.e("ImageProcessor", "Ошибка обработки", e)
-            MeasurementResult(0f, 0f, 0f, 0f, "Ошибка обработки: ${e.localizedMessage}")
+            ProcessedResult(
+                MeasurementResult(0f, 0f, 0f, 0f, "Ошибка обработки: ${e.localizedMessage}"),
+                null, null, null
+            )
         }
     }
 
     /**
-     * Улучшенный метод детектирования листа A4
+     * Простой метод нахождения листа A4 (по краям изображения)
      */
-    private fun detectPaperContourImproved(srcMat: Mat): MatOfPoint {
+    private fun findPaperRectSimple(srcMat: Mat): Rect {
+        // Предполагаем, что лист занимает центральную часть с небольшими отступами
+        val marginX = srcMat.width() / 20
+        val marginY = srcMat.height() / 20
+
+        return Rect(
+            marginX,
+            marginY,
+            srcMat.width() - 2 * marginX,
+            srcMat.height() - 2 * marginY
+        )
+    }
+
+    /**
+     * Поиск огурца с созданием маски для визуализации
+     */
+    private fun findCucumberWithVisualization(region: Mat): Pair<MatOfPoint, Mat> {
+        val mask = Mat.zeros(region.size(), CvType.CV_8UC1)
+
         try {
-            // 1. Уменьшаем изображение для ускорения обработки
-            val scaleFactor = 800.0 / maxOf(srcMat.width(), srcMat.height())
-            val newWidth = (srcMat.width() * scaleFactor).toInt()
-            val newHeight = (srcMat.height() * scaleFactor).toInt()
+            // 1. Конвертируем в HSV для выделения зеленого цвета
+            val hsv = Mat()
+            Imgproc.cvtColor(region, hsv, Imgproc.COLOR_BGR2HSV)
 
-            val resized = Mat()
-            Imgproc.resize(srcMat, resized, Size(newWidth.toDouble(), newHeight.toDouble()))
+            // Диапазон зеленого цвета
+            val lowerGreen = Scalar(35.0, 40.0, 40.0)
+            val upperGreen = Scalar(85.0, 255.0, 255.0)
 
-            // 2. Конвертируем в градации серого
+            val greenMask = Mat()
+            Core.inRange(hsv, lowerGreen, upperGreen, greenMask)
+
+            // 2. Также ищем темные объекты (на случай если огурец не зеленый)
             val gray = Mat()
-            Imgproc.cvtColor(resized, gray, Imgproc.COLOR_BGR2GRAY)
+            Imgproc.cvtColor(region, gray, Imgproc.COLOR_BGR2GRAY)
 
-            // 3. Нормализуем яркость
-            val normalized = Mat()
-            Core.normalize(gray, normalized, 0.0, 255.0, Core.NORM_MINMAX)
+            val binary = Mat()
+            Imgproc.threshold(gray, binary, 0.0, 255.0,
+                Imgproc.THRESH_BINARY_INV + Imgproc.THRESH_OTSU)
 
-            // 4. Размытие для удаления шума
-            val blurred = Mat()
-            Imgproc.GaussianBlur(normalized, blurred, Size(5.0, 5.0), 0.0)
+            // 3. Объединяем обе маски
+            Core.bitwise_or(greenMask, binary, mask)
 
-            // 5. Адаптивный порог для работы при разном освещении
-            val threshold = Mat()
-            Imgproc.adaptiveThreshold(
-                blurred, threshold, 255.0,
-                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
-                Imgproc.THRESH_BINARY_INV, 11, 2.0
-            )
+            // 4. Морфологические операции для улучшения маски
+            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel)
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel)
 
-            // 6. Морфологические операции для заполнения разрывов
-            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
-            val morphed = Mat()
-            Imgproc.morphologyEx(threshold, morphed, Imgproc.MORPH_CLOSE, kernel)
-
-            // 7. Находим контуры
+            // 5. Находим контуры
             val contours = mutableListOf<MatOfPoint>()
             val hierarchy = Mat()
-            Imgproc.findContours(morphed, contours, hierarchy,
+            Imgproc.findContours(mask, contours, hierarchy,
                 Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
             Log.d("ImageProcessor", "Найдено контуров: ${contours.size}")
 
             if (contours.isEmpty()) {
-                return MatOfPoint()
+                return Pair(MatOfPoint(), mask)
             }
 
-            // 8. Ищем самый большой контур (скорее всего это лист)
+            // 6. Ищем самый большой контур
             var maxArea = 0.0
             var largestContour: MatOfPoint? = null
 
             for (contour in contours) {
                 val area = Imgproc.contourArea(contour)
-                if (area > maxArea) {
+                if (area > maxArea && area > 500) { // Фильтр мелких объектов
                     maxArea = area
                     largestContour = contour
                 }
             }
 
-            if (largestContour == null) {
-                return MatOfPoint()
-            }
-
-            val largestContour2f = MatOfPoint2f().apply {
-                largestContour.convertTo(this, CvType.CV_32F)
-            }
-            // 9. Аппроксимируем контур (упрощаем до многоугольника)
-            val peri = Imgproc.arcLength(largestContour2f, true)
-            val approx = MatOfPoint2f()
-
-            Imgproc.approxPolyDP(largestContour2f, approx, CONTOUR_APPROX_EPSILON * peri, true)
-
-            // 10. Конвертируем обратно
-            val result = MatOfPoint()
-            approx.convertTo(result, CvType.CV_32S)
-
-            // Масштабируем обратно к исходному размеру
-            scaleContour(result, 1.0 / scaleFactor)
-
-            return result
+            return Pair(largestContour ?: MatOfPoint(), mask)
 
         } catch (e: Exception) {
-            Log.e("ImageProcessor", "Ошибка в detectPaperContourImproved", e)
-            return MatOfPoint()
+            Log.e("ImageProcessor", "Ошибка поиска огурца", e)
+            return Pair(MatOfPoint(), mask)
         }
     }
 
     /**
-     * Масштабирование контура
+     * Создание отладочного Bitmap с визуализацией
      */
-    private fun scaleContour(contour: MatOfPoint, scale: Double) {
-        val points = contour.toArray()
-        for (i in points.indices) {
-            points[i].x *= scale
-            points[i].y *= scale
+    private fun createDebugBitmap(
+        srcMat: Mat,
+        paperRect: Rect,
+        cucumberContour: MatOfPoint,
+        cucumberMask: Mat? = null
+    ): Bitmap {
+        try {
+            // Создаем копию исходного изображения
+            val resultMat = Mat()
+            srcMat.copyTo(resultMat)
+
+            // 1. Рисуем прямоугольник листа (синий)
+            Imgproc.rectangle(
+                resultMat,
+                Point(paperRect.x.toDouble(), paperRect.y.toDouble()),
+                Point(
+                    (paperRect.x + paperRect.width).toDouble(),
+                    (paperRect.y + paperRect.height).toDouble()
+                ),
+                Scalar(255.0, 0.0, 0.0), // BGR: синий
+                3
+            )
+
+            // 2. Если найден огурец, рисуем его контур и заливаем область
+            if (!cucumberContour.empty()) {
+                // Создаем маску для заливки области огурца
+                val fillMask = Mat.zeros(resultMat.size(), CvType.CV_8UC3)
+
+                // Конвертируем контур в координаты исходного изображения
+                val globalContour = MatOfPoint()
+                val points = cucumberContour.toArray()
+                val globalPoints = points.map { point ->
+                    Point(point.x + paperRect.x, point.y + paperRect.y)
+                }.toTypedArray()
+                globalContour.fromArray(*globalPoints)
+
+                // Рисуем контур (зеленый)
+                Imgproc.drawContours(
+                    resultMat,
+                    listOf(globalContour),
+                    -1,
+                    Scalar(0.0, 255.0, 0.0), // BGR: зеленый
+                    3
+                )
+
+                // Заливаем область огурца полупрозрачным зеленым
+                Imgproc.drawContours(
+                    fillMask,
+                    listOf(globalContour),
+                    -1,
+                    Scalar(0.0, 255.0, 0.0), // BGR: зеленый
+                    -1
+                )
+
+                // Добавляем полупрозрачную заливку к исходному изображению
+                Core.addWeighted(fillMask, 0.3, resultMat, 1.0, 0.0, resultMat)
+
+                // 3. Рисуем ограничивающий прямоугольник (красный)
+                val boundingRect = Imgproc.boundingRect(globalContour)
+                Imgproc.rectangle(
+                    resultMat,
+                    boundingRect.tl(),
+                    boundingRect.br(),
+                    Scalar(0.0, 0.0, 255.0), // BGR: красный
+                    2
+                )
+
+                // 4. Добавляем текст с размерами
+                val text = "Обнаружен огурец"
+                Imgproc.putText(
+                    resultMat,
+                    text,
+                    Point(boundingRect.x.toDouble(), boundingRect.y.toDouble() - 10),
+                    Imgproc.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    Scalar(0.0, 255.0, 255.0), // BGR: желтый
+                    2
+                )
+            }
+
+            // 5. Конвертируем обратно в Bitmap
+            val resultBitmap = Bitmap.createBitmap(
+                resultMat.width(), resultMat.height(), Bitmap.Config.ARGB_8888
+            )
+            Utils.matToBitmap(resultMat, resultBitmap)
+
+            return resultBitmap
+
+        } catch (e: Exception) {
+            Log.e("ImageProcessor", "Ошибка создания debug bitmap", e)
+            // Возвращаем пустой Bitmap в случае ошибки
+            return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
         }
-        contour.fromArray(*points)
     }
 
     /**
-     * Улучшенный расчет масштаба
+     * Расчет масштаба из прямоугольника
      */
-    private fun calculateScaleImproved(paperContour: MatOfPoint): Float {
-        if (paperContour.empty()) return 1.0f
+    private fun calculateScaleFromRect(rect: Rect): Float {
+        val widthPx = rect.width.toFloat()
+        val heightPx = rect.height.toFloat()
 
-        // Получаем ограничивающий прямоугольник
-        val rect = Imgproc.boundingRect(paperContour)
-
-        // Вычисляем ширину и высоту в пикселях
-        val widthPx = rect.width
-        val heightPx = rect.height
-
-        // Считаем, что большая сторона соответствует 297мм, меньшая - 210мм
+        // Определяем ориентацию
         val isLandscape = widthPx > heightPx
 
-        val actualWidthPx = if (isLandscape) widthPx else heightPx
-        val actualHeightPx = if (isLandscape) heightPx else widthPx
-
-        // Масштаб по ширине и высоте
-        val scaleX = actualWidthPx / A4_WIDTH_MM
-        val scaleY = actualHeightPx / A4_HEIGHT_MM
-
-        // Берем среднее значение
-        return ((scaleX + scaleY) / 2).toFloat()
-    }
-
-    /**
-     * Обрезка изображения до области листа
-     */
-    private fun cropToPaper(srcMat: Mat, paperContour: MatOfPoint): Mat {
-        val rect = Imgproc.boundingRect(paperContour)
-
-        // Добавляем небольшой отступ
-        val padding = 10
-        val x = max(0, rect.x - padding)
-        val y = max(0, rect.y - padding)
-        val width = min(srcMat.width() - x, rect.width + padding * 2)
-        val height = min(srcMat.height() - y, rect.height + padding * 2)
-
-        val roi = Rect(x, y, width, height)
-        return Mat(srcMat, roi)
-    }
-
-    /**
-     * Детектирование огурца
-     */
-    private fun detectCucumber(paperRegion: Mat): MatOfPoint {
-        try {
-            // 1. Конвертируем в градации серого
-            val gray = Mat()
-            Imgproc.cvtColor(paperRegion, gray, Imgproc.COLOR_BGR2GRAY)
-
-            // 2. Улучшаем контраст с помощью CLAHE
-            val clahe = Imgproc.createCLAHE(2.0, Size(8.0, 8.0))
-            val enhanced = Mat()
-            clahe.apply(gray, enhanced)
-
-            // 3. Пороговая обработка для выделения темного объекта на светлом фоне
-            val threshold = Mat()
-            Imgproc.threshold(enhanced, threshold, 0.0, 255.0,
-                Imgproc.THRESH_BINARY_INV + Imgproc.THRESH_OTSU)
-
-            // 4. Морфологические операции для очистки
-            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
-            val cleaned = Mat()
-            Imgproc.morphologyEx(threshold, cleaned, Imgproc.MORPH_CLOSE, kernel)
-            Imgproc.morphologyEx(cleaned, cleaned, Imgproc.MORPH_OPEN, kernel)
-
-            // 5. Находим контуры
-            val contours = mutableListOf<MatOfPoint>()
-            val hierarchy = Mat()
-            Imgproc.findContours(cleaned, contours, hierarchy,
-                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-
-            Log.d("ImageProcessor", "Найдено контуров огурца: ${contours.size}")
-
-            if (contours.isEmpty()) {
-                return MatOfPoint()
-            }
-
-            // 6. Ищем самый большой контур (это должен быть огурец)
-            var maxArea = 0.0
-            var bestContour: MatOfPoint? = null
-
-            for (contour in contours) {
-                val area = Imgproc.contourArea(contour)
-                val rect = Imgproc.boundingRect(contour)
-                val aspectRatio = rect.width.toDouble() / rect.height.toDouble()
-
-                // Фильтруем слишком маленькие и слишком вытянутые объекты
-                if (area > maxArea && area > 500 && aspectRatio < 5.0 && aspectRatio > 0.2) {
-                    maxArea = area
-                    bestContour = contour
-                }
-            }
-
-            return bestContour ?: MatOfPoint()
-
-        } catch (e: Exception) {
-            Log.e("ImageProcessor", "Ошибка в detectCucumber", e)
-            return MatOfPoint()
+        return if (isLandscape) {
+            val scaleX = widthPx / A4_HEIGHT_MM
+            val scaleY = heightPx / A4_WIDTH_MM
+            (scaleX + scaleY) / 2
+        } else {
+            val scaleX = widthPx / A4_WIDTH_MM
+            val scaleY = heightPx / A4_HEIGHT_MM
+            (scaleX + scaleY) / 2
         }
     }
 
     /**
-     * Расчет всех измерений
+     * Расчет измерений
      */
-    private fun calculateMeasurements(cucumberContour: MatOfPoint, scale: Float): MeasurementResult {
-        // 1. Получаем ограничивающий прямоугольник
-        val rect = Imgproc.boundingRect(cucumberContour)
+    private fun calculateMeasurements(contour: MatOfPoint, scale: Float): MeasurementResult {
+        val rect = Imgproc.boundingRect(contour)
 
-        // 2. Получаем повернутый прямоугольник для более точных измерений
+        // Получаем повернутый прямоугольник для более точных измерений
         val points2f = MatOfPoint2f()
-        cucumberContour.convertTo(points2f, CvType.CV_32F)
+        contour.convertTo(points2f, CvType.CV_32F)
         val rotatedRect = Imgproc.minAreaRect(points2f)
 
-        // 3. Определяем длину и ширину
+        // Длина и ширина
         val size = rotatedRect.size
         val lengthPx = max(size.width, size.height)
         val widthPx = min(size.width, size.height)
 
-        // 4. Преобразуем в миллиметры
+        // В миллиметрах
         val lengthMm = lengthPx / scale
         val widthMm = widthPx / scale
-
-        // 5. Диаметр считаем как среднюю ширину
         val diameterMm = widthMm
 
-        // 6. Объем (цилиндр)
-        val volumeMm3 = calculateVolumeCylinder(lengthMm.toFloat(), diameterMm.toFloat())
+        // Объем
+        val volumeMm3 = (Math.PI * (diameterMm / 2) * (diameterMm / 2) * lengthMm).toFloat()
 
         return MeasurementResult(
             length = lengthMm.toFloat(),
@@ -316,14 +340,6 @@ class ImageProcessor {
             diameter = diameterMm.toFloat(),
             volume = volumeMm3
         )
-    }
-
-    /**
-     * Расчет объема цилиндра
-     */
-    private fun calculateVolumeCylinder(length: Float, diameter: Float): Float {
-        val radius = diameter / 2
-        return (Math.PI * radius * radius * length).toFloat()
     }
 
     /**

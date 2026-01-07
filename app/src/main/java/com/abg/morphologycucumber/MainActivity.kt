@@ -21,34 +21,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var imageProcessor: ImageProcessor
 
-    // Переменные для хранения текущего состояния
-    private var currentBitmap: Bitmap? = null
-    private var currentPhotoPath: String? = null
-    private var currentMeasurements: MeasurementResult? = null
+    private var currentOriginalBitmap: Bitmap? = null
+    private var currentDebugBitmap: Bitmap? = null
+    private var showDebugView = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Инициализация OpenCV
-        if (!OpenCVLoader.initDebug()) {
-            Log.e("MainActivity", "OpenCV initialization failed!")
-            showToast("Ошибка инициализации OpenCV")
-        } else {
-            Log.d("MainActivity", "OpenCV initialized successfully")
-        }
-
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Инициализация компонентов
-        imageProcessor = ImageProcessor()
+        // Инициализация OpenCV
+        if (!OpenCVLoader.initDebug()) {
+            Log.e("MainActivity", "OpenCV initialization failed!")
+            binding.resultText.text = "Ошибка: OpenCV не загружен"
+        } else {
+            Log.d("MainActivity", "OpenCV initialized successfully")
+            imageProcessor = ImageProcessor()
+        }
 
         setupUI()
     }
 
     private fun setupUI() {
-        // Настройка кнопок и обработчиков
-
         binding.btnSelectImage.setOnClickListener {
             openImagePicker()
         }
@@ -57,42 +52,52 @@ class MainActivity : AppCompatActivity() {
             analyzeImage()
         }
 
-        binding.btnSaveResults.setOnClickListener {
-            saveResults()
-        }
-
         binding.btnRetry.setOnClickListener {
             resetAnalysis()
         }
 
-        // Изначально скрываем дополнительные элементы
-        binding.progressBar.visibility = View.GONE
-        binding.detailedResultLayout.visibility = View.GONE
-        binding.btnSaveResults.isEnabled = false
-        binding.btnRetry.isEnabled = false
+        binding.btnToggleView.setOnClickListener {
+            toggleDebugView()
+        }
+
+        binding.btnHelp.setOnClickListener {
+            showHelpDialog()
+        }
+
+        // Начальное состояние
+        updateUIState(false, false)
+        binding.btnToggleView.visibility = View.GONE
     }
 
     private val cropImage = registerForActivityResult(CropImageContract()) { result ->
         if (result.isSuccessful) {
-            result.getBitmap(this)?.let { bitmap ->
-                currentBitmap = bitmap
-                currentPhotoPath = result.uriContent?.path
+            try {
+                val bitmap = result.getBitmap(this)
+                if (bitmap != null) {
+                    // Создаем копию в правильном формате
+                    val compatibleBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
 
-                // Обновление UI
-                binding.imageView.setImageBitmap(bitmap)
-                binding.imageView.visibility = View.VISIBLE
-                binding.imagePlaceholder.visibility = View.GONE
+                    if (compatibleBitmap != null) {
+                        currentOriginalBitmap = compatibleBitmap
+                        currentDebugBitmap = null
+                        showDebugView = false
 
-                // Сброс предыдущих результатов
-                resetResultsUI()
+                        // Показываем исходное изображение
+                        binding.imageView.setImageBitmap(compatibleBitmap)
+                        binding.imageView.visibility = View.VISIBLE
+                        binding.imagePlaceholder.visibility = View.GONE
 
-                // Включаем кнопку анализа
-                binding.btnAnalyze.isEnabled = true
+                        resetResultsUI()
+                        binding.btnAnalyze.isEnabled = true
+                        binding.btnToggleView.visibility = View.GONE
 
-                showToast("Изображение успешно загружено")
+                        showToast("Изображение загружено")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Ошибка загрузки изображения", e)
+                showToast("Ошибка загрузки изображения")
             }
-        } else {
-            showToast("Не удалось загрузить изображение")
         }
     }
 
@@ -103,94 +108,116 @@ class MainActivity : AppCompatActivity() {
                 cropImageOptions = CropImageOptions(
                     imageSourceIncludeGallery = true,
                     imageSourceIncludeCamera = true,
-                    aspectRatioX = 1,
-                    aspectRatioY = 1,
+                    aspectRatioX = 210,
+                    aspectRatioY = 297,
                     maxZoom = 4,
                     outputCompressFormat = Bitmap.CompressFormat.JPEG,
-                    outputCompressQuality = 90
+                    outputCompressQuality = 90,
+                    guidelines = com.canhub.cropper.CropImageView.Guidelines.ON,
+                    fixAspectRatio = true
                 ),
-            ),
+            )
         )
     }
 
     private fun analyzeImage() {
-        val bitmap = currentBitmap
+        val bitmap = currentOriginalBitmap
         if (bitmap == null) {
             showToast("Сначала выберите изображение")
             return
         }
 
-        // Блокируем кнопки во время анализа
-        binding.btnAnalyze.isEnabled = false
-        binding.btnSelectImage.isEnabled = false
+        if (bitmap.isRecycled) {
+            showToast("Изображение повреждено. Выберите другое.")
+            return
+        }
 
-        // Показать индикатор загрузки
-        binding.progressBar.visibility = View.VISIBLE
+        // Обновляем UI
+        updateUIState(true, false)
         binding.resultText.text = "Анализ изображения..."
 
         lifecycleScope.launch {
             try {
-                // Обработка изображения в фоновом потоке
-                val measurements = withContext(Dispatchers.Default) {
+                val result = withContext(Dispatchers.IO) {
                     imageProcessor.processCucumberImage(bitmap)
                 }
 
-                currentMeasurements = measurements
-
-                // Обновление UI в основном потоке
                 runOnUiThread {
-                    binding.progressBar.visibility = View.GONE
+                    if (result.measurements.error != null) {
+                        // Ошибка
+                        binding.resultText.text = result.measurements.error
+                        updateUIState(false, false)
+                        showToast("Ошибка анализа")
 
-                    if (measurements.error != null) {
-                        // Показать ошибку
-                        binding.resultText.text = "Ошибка: ${measurements.error}"
-                        binding.btnAnalyze.isEnabled = true
-                        binding.btnSelectImage.isEnabled = true
-                        showToast(measurements.error)
-                        Log.d("!!!", "Ошибка: ${measurements.error}")
+                        // Если есть debug bitmap, показываем его
+                        result.debugBitmap?.let { debugBitmap ->
+                            currentDebugBitmap = debugBitmap
+                            binding.btnToggleView.visibility = View.VISIBLE
+                            toggleDebugView()
+                        }
                     } else {
-                        // Показать результаты
-                        updateResultsUI(measurements)
-                        binding.btnAnalyze.isEnabled = false
-                        binding.btnSelectImage.isEnabled = true
-                        binding.btnSaveResults.isEnabled = true
-                        binding.btnRetry.isEnabled = true
+                        // Успех
+                        displayResults(result)
+                        updateUIState(false, true)
+                        showToast("Анализ завершен")
+
+                        // Сохраняем debug bitmap и показываем кнопку переключения
+                        currentDebugBitmap = result.debugBitmap
+                        binding.btnToggleView.visibility = View.VISIBLE
+                        toggleDebugView()
                     }
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    binding.progressBar.visibility = View.GONE
-                    binding.resultText.text = "Ошибка анализа"
-                    binding.btnAnalyze.isEnabled = true
-                    binding.btnSelectImage.isEnabled = true
-                    showToast("Ошибка анализа изображения: ${e.message}")
-                    Log.e("MainActivity", "Error analyzing image", e)
+                    binding.resultText.text = "Ошибка: ${e.localizedMessage}"
+                    updateUIState(false, false)
+                    showToast("Ошибка анализа")
                 }
             }
         }
     }
 
-    private fun updateResultsUI(measurements: MeasurementResult) {
-        // Обновление текстовых полей с результатами
-        binding.tvLengthValue.text = String.format("%.1f мм", measurements.length)
-        binding.tvWidthValue.text = String.format("%.1f мм", measurements.width)
-        binding.tvDiameterValue.text = String.format("%.1f мм", measurements.diameter)
-        binding.tvVolumeValue.text = String.format("%.0f мм³", measurements.volume)
-
-        // Расчет примерного веса (предполагаем плотность 0.9 г/см³)
-        val weightGrams = measurements.volume * 0.0009f // переводим мм³ в см³ и умножаем на плотность
-        binding.tvWeightValue.text = String.format("%.1f г", weightGrams)
-
-        // Обновляем общий текст результата
+    private fun displayResults(result: ImageProcessor.ProcessedResult) {
+        // Основной текст с результатами
+        val measurements = result.measurements
         binding.resultText.text = String.format(
-            "Огурец: %.1f мм × %.1f мм, объем %.0f мм³",
+            "Огурец: %.1f × %.1f мм\nОбъем: %.0f мм³",
             measurements.length,
             measurements.diameter,
             measurements.volume
         )
 
-        // Показать детальные результаты
+        // Детальные результаты
+        binding.tvLengthValue.text = String.format("%.1f мм", measurements.length)
+        binding.tvWidthValue.text = String.format("%.1f мм", measurements.width)
+        binding.tvDiameterValue.text = String.format("%.1f мм", measurements.diameter)
+        binding.tvVolumeValue.text = String.format("%.0f мм³", measurements.volume)
+
+        // Примерный вес
+        val weightGrams = measurements.volume * 0.0009f
+        binding.tvWeightValue.text = String.format("%.1f г", weightGrams)
+
         binding.detailedResultLayout.visibility = View.VISIBLE
+    }
+
+    private fun toggleDebugView() {
+        showDebugView = !showDebugView
+
+        if (showDebugView && currentDebugBitmap != null) {
+            // Показываем изображение с разметкой
+            binding.imageView.setImageBitmap(currentDebugBitmap)
+            binding.btnToggleView.text = "Показать оригинал"
+            binding.tvViewMode.text = "Режим: Разметка"
+        } else {
+            // Показываем оригинальное изображение
+            currentOriginalBitmap?.let {
+                binding.imageView.setImageBitmap(it)
+            }
+            binding.btnToggleView.text = "Показать разметку"
+            binding.tvViewMode.text = "Режим: Оригинал"
+        }
+
+        binding.tvViewMode.visibility = View.VISIBLE
     }
 
     private fun resetResultsUI() {
@@ -201,44 +228,53 @@ class MainActivity : AppCompatActivity() {
         binding.tvDiameterValue.text = "-"
         binding.tvVolumeValue.text = "-"
         binding.tvWeightValue.text = "-"
-        currentMeasurements = null
-        binding.btnSaveResults.isEnabled = false
-        binding.btnRetry.isEnabled = false
+        binding.tvViewMode.visibility = View.GONE
     }
 
     private fun resetAnalysis() {
-        currentBitmap?.let {
-            resetResultsUI()
-            binding.btnAnalyze.isEnabled = true
-            showToast("Анализ сброшен. Можно провести анализ заново.")
+        resetResultsUI()
+        binding.btnAnalyze.isEnabled = true
+        binding.btnToggleView.visibility = View.GONE
+
+        // Восстанавливаем оригинальное изображение
+        currentOriginalBitmap?.let {
+            binding.imageView.setImageBitmap(it)
         }
+        showDebugView = false
+
+        showToast("Готово к новому анализу")
     }
 
-    private fun saveResults() {
-        val measurements = currentMeasurements
-        if (measurements == null || measurements.error != null) {
-            showToast("Нет данных для сохранения")
-            return
-        }
+    private fun updateUIState(isAnalyzing: Boolean, hasResults: Boolean) {
+        binding.progressBar.visibility = if (isAnalyzing) View.VISIBLE else View.GONE
+        binding.btnAnalyze.isEnabled = !isAnalyzing && !hasResults
+        binding.btnSelectImage.isEnabled = !isAnalyzing
+        binding.btnRetry.isEnabled = hasResults
+        binding.btnToggleView.isEnabled = hasResults || currentDebugBitmap != null
+    }
 
-        // Здесь можно реализовать сохранение в базу данных или файл
-        // Например, используя Room или SharedPreferences
+    private fun showHelpDialog() {
+        val message = """
+            Как правильно фотографировать:
+            
+            1. Положите огурец на чистый белый лист А4
+            2. Сделайте фото сверху при хорошем освещении
+            3. Убедитесь, что весь лист виден в кадре
+            4. Огурец должен быть контрастным на фоне листа
+            5. Избегайте теней и бликов
+            
+            После анализа:
+            • Нажмите "Показать разметку" чтобы увидеть область огурца
+            • Зеленым контуром выделен огурец
+            • Синим прямоугольником выделен лист А4
+            • Красным прямоугольником - границы огурца
+        """.trimIndent()
 
-        // Временное сохранение в SharedPreferences для примера
-        val sharedPref = getSharedPreferences("cucumber_measurements", MODE_PRIVATE)
-        with(sharedPref.edit()) {
-            putFloat("last_length", measurements.length)
-            putFloat("last_width", measurements.width)
-            putFloat("last_diameter", measurements.diameter)
-            putFloat("last_volume", measurements.volume)
-            putString("last_photo_path", currentPhotoPath)
-            apply()
-        }
-
-        showToast("Результаты сохранены")
-
-        // Можно также экспортировать в CSV или показать диалог сохранения
-        binding.btnSaveResults.isEnabled = false
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Инструкция")
+            .setMessage(message)
+            .setPositiveButton("Понятно") { dialog, _ -> dialog.dismiss() }
+            .show()
     }
 
     private fun showToast(message: String) {
@@ -247,7 +283,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Освобождение ресурсов
-        currentBitmap?.recycle()
+        currentOriginalBitmap?.recycle()
+        currentDebugBitmap?.recycle()
     }
 }
