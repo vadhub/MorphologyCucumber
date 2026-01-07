@@ -50,8 +50,11 @@ class ImageProcessor(private val context: Context) {
             Utils.bitmapToMat(compatibleBitmap, srcMat)
             Log.d("ImageProcessor", "Размер srcMat: ${srcMat.width()}x${srcMat.height()}, каналы: ${srcMat.channels()}")
 
-            // 2. Находим лист A4 (простой метод - по краям)
-            val paperRect = findPaperRectSimple(srcMat)
+            // 2. бинаризация
+            val binary = convertToBinary(srcMat)
+
+            // 3. Находим лист A4 (новый метод)
+            val paperRect = detectSheet(binary)
             Log.d("ImageProcessor", "Найден прямоугольник листа: $paperRect")
 
             if (paperRect.width <= 0 || paperRect.height <= 0) {
@@ -61,18 +64,17 @@ class ImageProcessor(private val context: Context) {
                 )
             }
 
-            // 3. Получаем масштаб
+            // 4. Получаем масштаб
             val scale = calculateScaleFromRect(paperRect)
             Log.d("ImageProcessor", "Масштаб: $scale")
 
-            // 4. Обрезаем до области листа
-            val paperRegion = Mat(srcMat, paperRect)
+            // 5. Обрезаем до области листа
+            val paperRegion = Mat(srcMat, paperRect) // Исходное цветное изображение!
 
-            // 5. Ищем огурец
-            val cucumberContour = findCucumberWithVisualization(paperRegion)
+            // 6. Ищем огурец (в исходной области листа)
+             val cucumberContour = findCucumberAdaptive(paperRegion)
 
-            if (cucumberContour.first.empty()) {
-                // Создаем простую визуализацию без огурца
+            if (cucumberContour.empty()) {
                 val debugBitmap = createSimpleDebugBitmap(srcMat, paperRect)
                 return ProcessedResult(
                     MeasurementResult(0f, 0f, 0f, 0f, "Не удалось найти огурец"),
@@ -80,19 +82,15 @@ class ImageProcessor(private val context: Context) {
                 )
             }
 
-            // 6. Вычисляем измерения
-            val measurements = calculateMeasurements(cucumberContour.first, scale)
+            // 7. Вычисляем измерения
+            val measurements = calculateMeasurements(cucumberContour, scale)
 
-            // 7. Создаем Bitmap с визуализацией
-            val debugBitmap = createDebugBitmap(srcMat, paperRect, cucumberContour.first)
+            // 8. Создаем Bitmap с визуализацией
+            val debugBitmap = createDebugBitmap(srcMat, paperRect, cucumberContour)
 
-            // 8. Возвращаем результат
-            ProcessedResult(
-                measurements,
-                cucumberContour.first,
-                paperRect,
-                debugBitmap
-            )
+            // 9. Возвращаем результат
+            ProcessedResult(measurements, cucumberContour, paperRect, debugBitmap)
+
 
         } catch (e: Exception) {
             Log.e("ImageProcessor", "Ошибка обработки", e)
@@ -101,6 +99,40 @@ class ImageProcessor(private val context: Context) {
                 null, null, null
             )
         }
+    }
+
+    // === Перевод изображения в черно-белое (бинарное) ===
+    private fun convertToBinary(image: Mat): Mat {
+        val gray = Mat()
+        Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY)
+
+        val binary = Mat()
+        Imgproc.threshold(gray, binary, 127.0, 255.0, Imgproc.THRESH_BINARY)
+        return binary
+    }
+
+    // === Определение границ листа A4 ===
+    private fun detectSheet(image: Mat): Rect {
+        // Поиск контуров
+        val contours = ArrayList<MatOfPoint>()
+        val hierarchy = Mat()
+        Imgproc.findContours(image.clone(), contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
+
+        // Отбор самого большого контура
+        var bestContour: MatOfPoint? = null
+        var maxArea = 0.0
+
+        for (contour in contours) {
+            val area = Imgproc.contourArea(contour)
+            if (area > maxArea) {
+                maxArea = area
+                bestContour = contour
+            }
+        }
+
+        if (bestContour == null) return Rect()
+
+        return Imgproc.boundingRect(bestContour)
     }
 
     /**
@@ -120,57 +152,153 @@ class ImageProcessor(private val context: Context) {
     }
 
     /**
+     * Поиск огурца с перебором цветовых диапазонов (зелёный → жёлтый → тёмно‑зелёный)
+     * @param region Обрезанное цветное изображение (область листа A4)
+     * @return Найденный контур огурца или пустой MatOfPoint
+     */
+    private fun findCucumberAdaptive(region: Mat): MatOfPoint {
+        // Список цветовых диапазонов для проверки (порядок важен!)
+        val colorRanges = listOf(
+            // 1. Стандартный зелёный (основной вариант)
+            Pair(Scalar(35.0, 40.0, 40.0), Scalar(85.0, 255.0, 255.0)),
+            // 2. Жёлтый (недозрелые/светлые огурцы)
+            Pair(Scalar(20.0, 40.0, 40.0), Scalar(40.0, 255.0, 255.0)),
+            // 3. Тёмно‑зелёный/перезревшие
+            Pair(Scalar(60.0, 40.0, 40.0), Scalar(90.0, 255.0, 255.0))
+        )
+
+        for ((lower, upper) in colorRanges) {
+            Log.d("ImageProcessor", "Проверка диапазона: HSV(${lower.`val`[0]}, ${lower.`val`[1]}, ${lower.`val`[2]}) – (${upper.`val`[0]}, ${upper.`val`[1]}, ${upper.`val`[2]})")
+
+            val contour = findCucumberByColorRange(region, lower, upper)
+            if (!contour.empty()) {
+                Log.d("ImageProcessor", "Огурец найден в диапазоне $lower – $upper")
+                return contour
+            }
+        }
+
+        Log.w("ImageProcessor", "Огурец не найден ни в одном цветовом диапазоне")
+        return MatOfPoint()
+    }
+
+    /**
+     * Поиск огурца в заданном HSV‑диапазоне
+     * @param region Изображение
+     * @param lower Нижний порог HSV
+     * @param upper Верхний порог HSV
+     * @return Контур или пустой MatOfPoint
+     */
+    private fun findCucumberByColorRange(region: Mat, lower: Scalar, upper: Scalar): MatOfPoint {
+        try {
+            val hsv = Mat()
+            Imgproc.cvtColor(region, hsv, Imgproc.COLOR_BGR2HSV)
+
+
+            val mask = Mat()
+            Core.inRange(hsv, lower, upper, mask)
+
+            // Морфологические операции
+            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel, Point(-1.0, -1.0), 1)
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel, Point(-1.0, -1.0), 2)
+            Imgproc.dilate(mask, mask, kernel, Point(-1.0, -1.0), 1)
+
+            // Поиск контуров
+            val contours = mutableListOf<MatOfPoint>()
+            val hierarchy = Mat()
+            Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+
+            if (contours.isEmpty()) return MatOfPoint()
+
+            // Выбор лучшего контура
+            var bestContour: MatOfPoint? = null
+            var maxArea = 0.0
+
+            for (contour in contours) {
+                val area = Imgproc.contourArea(contour)
+                if (area < region.width() * region.height() * 0.01) continue  // Минимум 1% площади
+
+                val rect = Imgproc.boundingRect(contour)
+                val aspectRatio = rect.width.toFloat() / rect.height.toFloat()
+                val elongation = max(aspectRatio, 1 / aspectRatio)
+                if (elongation < 1.3) continue  // Слишком круглый
+
+                if (area > maxArea) {
+                    maxArea = area
+                    bestContour = contour
+                }
+            }
+
+            return bestContour ?: MatOfPoint()
+
+
+        } catch (e: Exception) {
+            Log.e("ImageProcessor", "Ошибка поиска в диапазоне $lower–$upper", e)
+            return MatOfPoint()
+        }
+    }
+
+    /**
      * Поиск огурца
      */
     private fun findCucumberWithVisualization(region: Mat): Pair<MatOfPoint, Mat> {
         val mask = Mat.zeros(region.size(), CvType.CV_8UC1)
 
         try {
-            // 1. Конвертируем в градации серого
+            // 1. Градации серого
             val gray = Mat()
             Imgproc.cvtColor(region, gray, Imgproc.COLOR_BGR2GRAY)
 
-            // 2. Пороговая обработка для выделения темных областей (огурец обычно темнее фона)
+            // 2. Адаптивная бинаризация (настройка для тёмных объектов)
             val binary = Mat()
-            Imgproc.threshold(gray, binary, 0.0, 255.0,
-                Imgproc.THRESH_BINARY_INV + Imgproc.THRESH_OTSU)
+            Imgproc.adaptiveThreshold(
+                gray, binary,
+                255.0,
+                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                Imgproc.THRESH_BINARY_INV,  // ИНВЕРСИЯ: тёмные объекты → белые
+                15,  // Размер окна (больше = устойчивее к шуму)
+                3.0  // Константа вычитания (меньше = чувствительнее к деталям)
+            )
 
-            // 3. Морфологические операции для улучшения маски
-            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
-            Imgproc.morphologyEx(binary, mask, Imgproc.MORPH_CLOSE, kernel)
-            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel)
+            // 3. Морфологические операции (осторожные)
+            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(3.0, 3.0))
+            Imgproc.morphologyEx(binary, mask, Imgproc.MORPH_CLOSE, kernel, Point(-1.0, -1.0), 1)
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel, Point(-1.0, -1.0), 1)
 
-            // 4. Находим контуры
+            // 4. Поиск контуров
             val contours = mutableListOf<MatOfPoint>()
             val hierarchy = Mat()
-            Imgproc.findContours(mask, contours, hierarchy,
-                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+            Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
-            Log.d("ImageProcessor", "Найдено контуров: ${contours.size}")
+            if (contours.isEmpty()) return Pair(MatOfPoint(), mask)
 
-            if (contours.isEmpty()) {
-                return Pair(MatOfPoint(), mask)
-            }
-
-            // 5. Ищем самый большой контур
-            var maxArea = 0.0
-            var largestContour: MatOfPoint? = null
+            // 5. Выбор контура по критериям:
+            // - Площадь > 1% от площади листа
+            // - Соотношение сторон (длина/ширина) > 1.5 (огурец вытянутый)
+            var bestContour: MatOfPoint? = null
+            val minArea = (region.width() * region.height()) * 0.01  // 1%
+            val minRatio = 1.5
 
             for (contour in contours) {
                 val area = Imgproc.contourArea(contour)
-                if (area > maxArea && area > 500) { // Фильтр мелких объектов
-                    maxArea = area
-                    largestContour = contour
+                if (area < minArea) continue
+
+                val rect = Imgproc.boundingRect(contour)
+                val ratio = max(rect.width, rect.height).toFloat() / min(rect.width, rect.height).toFloat()
+                if (ratio >= minRatio) {
+                    bestContour = contour
+                    break  // Берём первый подходящий (самый большой)
                 }
             }
 
-            return Pair(largestContour ?: MatOfPoint(), mask)
+            return Pair(bestContour ?: MatOfPoint(), mask)
 
         } catch (e: Exception) {
             Log.e("ImageProcessor", "Ошибка поиска огурца", e)
             return Pair(MatOfPoint(), mask)
         }
     }
+
 
     /**
      * Создание простого отладочного Bitmap (без огурца)
