@@ -25,15 +25,24 @@
         <LinearLayout
             android:orientation="horizontal"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp">
+
+            <Button
+                android:id="@+id/btnCamera"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="Камера"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"/>
 
             <Button
                 android:id="@+id/btnSelectImage"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:text="Выбрать изображение"
-                android:layout_marginBottom="16dp"
-                android:layout_weight="1"/>
+                android:text="Галерея"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"/>
 
             <Button
                 android:id="@+id/btnHelp"
@@ -51,7 +60,9 @@
             android:layout_width="match_parent"
             android:layout_height="250dp"
             android:background="@android:color/darker_gray"
-            android:layout_marginBottom="16dp">
+            android:layout_marginBottom="16dp"
+            android:clickable="true"
+            android:focusable="true">
 
             <ImageView
                 android:id="@+id/imagePlaceholder"

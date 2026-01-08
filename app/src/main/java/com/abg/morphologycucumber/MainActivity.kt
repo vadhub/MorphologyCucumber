@@ -1,18 +1,23 @@
 package com.abg.morphologycucumber
 
+import android.Manifest
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.abg.morphologycucumber.databinding.ActivityMainBinding
 import com.canhub.cropper.CropImageContract
 import com.canhub.cropper.CropImageContractOptions
 import com.canhub.cropper.CropImageOptions
+import com.permissionx.guolindev.PermissionX
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -36,6 +41,12 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // Проверяем, есть ли изображение с камеры
+        val croppedBitmapPath = intent.getStringExtra("cropped_bitmap")
+        if (!croppedBitmapPath.isNullOrEmpty()) {
+            loadImageFromPath(croppedBitmapPath)
+        }
+
         // Инициализация OpenCV
         if (!OpenCVLoader.initDebug()) {
             Log.e("MainActivity", "OpenCV initialization failed!")
@@ -48,9 +59,77 @@ class MainActivity : AppCompatActivity() {
         setupUI()
     }
 
+    private fun loadImageFromPath(path: String) {
+        lifecycleScope.launch {
+            try {
+                val bitmap = withContext(Dispatchers.IO) {
+                    BitmapFactory.decodeFile(path)
+                }
+
+                if (bitmap != null) {
+                    currentOriginalBitmap?.recycle()
+                    currentOriginalBitmap = bitmap
+                    currentDebugBitmap = null
+                    showDebugView = false
+
+                    runOnUiThread {
+                        binding.imageView.setImageBitmap(bitmap)
+                        binding.imageView.visibility = View.VISIBLE
+                        binding.imagePlaceholder.visibility = View.GONE
+
+                        resetResultsUI()
+                        binding.btnAnalyze.isEnabled = true
+                        binding.btnToggleView.visibility = View.GONE
+                        binding.tvViewMode.visibility = View.GONE
+
+                        showToast("Изображение загружено с камеры")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Error loading image from path", e)
+                showToast("Ошибка загрузки изображения")
+            }
+        }
+    }
+
+    private fun openCamera() {
+        // Запуск камеры с оверлеем A4
+        val intent = Intent(this, CameraActivity::class.java)
+        startActivity(intent)
+    }
+
+    private fun checkCameraPermissions() {
+        PermissionX.init(this)
+            .permissions(Manifest.permission.CAMERA)
+            .request { allGranted, _, _ ->
+                if (allGranted) {
+                    openCamera()
+                } else {
+                    showSettingsDialog()
+                }
+            }
+    }
+
+    private fun showSettingsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Доступ к камере")
+            .setMessage("Для работы приложения требуется разрешение на камеру. Перейдите в настройки и включите его.")
+            .setPositiveButton("Настройки") { _, _ ->
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                intent.data = Uri.fromParts("package", packageName, null)
+                startActivity(intent)
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
     private fun setupUI() {
         binding.btnSelectImage.setOnClickListener {
             openImagePicker()
+        }
+
+        binding.btnCamera.setOnClickListener {
+            checkCameraPermissions()
         }
 
         binding.btnAnalyze.setOnClickListener {
@@ -65,6 +144,10 @@ class MainActivity : AppCompatActivity() {
             resetAnalysis()
         }
 
+        binding.btnSaveResults.setOnClickListener {
+            saveResults()
+        }
+
         // Обработчик нажатия на область изображения
         binding.imageHolder.setOnClickListener {
             openFullscreenImage()
@@ -74,6 +157,7 @@ class MainActivity : AppCompatActivity() {
         updateUIState(false, false)
         binding.btnToggleView.visibility = View.GONE
         binding.tvViewMode.visibility = View.GONE
+        binding.btnSaveResults.isEnabled = false
     }
 
     private fun openFullscreenImage() {
@@ -148,6 +232,7 @@ class MainActivity : AppCompatActivity() {
                         binding.btnAnalyze.isEnabled = true
                         binding.btnToggleView.visibility = View.GONE
                         binding.tvViewMode.visibility = View.GONE
+                        binding.btnSaveResults.isEnabled = false
 
                         showToast("Изображение загружено")
                     }
@@ -167,7 +252,7 @@ class MainActivity : AppCompatActivity() {
                 uri = null,
                 cropImageOptions = CropImageOptions(
                     imageSourceIncludeGallery = true,
-                    imageSourceIncludeCamera = true,
+                    imageSourceIncludeCamera = false, // Мы используем свою камеру
                     aspectRatioX = 210,
                     aspectRatioY = 297,
                     maxZoom = 4,
@@ -214,6 +299,7 @@ class MainActivity : AppCompatActivity() {
                         binding.resultText.text = result.measurements.error
                         updateUIState(false, false)
                         showToast("Ошибка анализа")
+                        binding.btnSaveResults.isEnabled = false
 
                         // Если есть debug bitmap, показываем его
                         if (result.debugBitmap != null) {
@@ -227,6 +313,7 @@ class MainActivity : AppCompatActivity() {
                         displayResults(result)
                         updateUIState(false, true)
                         showToast("Анализ завершен успешно")
+                        binding.btnSaveResults.isEnabled = true
 
                         // Сохраняем debug bitmap и показываем кнопку переключения
                         currentDebugBitmap?.recycle()
@@ -242,6 +329,8 @@ class MainActivity : AppCompatActivity() {
                     binding.resultText.text = "Ошибка анализа"
                     binding.btnAnalyze.isEnabled = true
                     binding.btnSelectImage.isEnabled = true
+                    binding.btnCamera.isEnabled = true
+                    binding.btnSaveResults.isEnabled = false
                     showToast("Ошибка анализа изображения: ${e.message}")
                 }
             }
@@ -306,6 +395,7 @@ class MainActivity : AppCompatActivity() {
         resetResultsUI()
         binding.btnAnalyze.isEnabled = true
         binding.btnToggleView.visibility = View.GONE
+        binding.btnSaveResults.isEnabled = false
 
         // Восстанавливаем оригинальное изображение
         currentOriginalBitmap?.let {
@@ -320,8 +410,47 @@ class MainActivity : AppCompatActivity() {
         binding.progressBar.visibility = if (isAnalyzing) View.VISIBLE else View.GONE
         binding.btnAnalyze.isEnabled = !isAnalyzing && !hasResults
         binding.btnSelectImage.isEnabled = !isAnalyzing
+        binding.btnCamera.isEnabled = !isAnalyzing
         binding.btnRetry.isEnabled = hasResults
         binding.btnToggleView.isEnabled = hasResults || currentDebugBitmap != null
+        binding.btnSaveResults.isEnabled = hasResults
+    }
+
+    private fun saveResults() {
+        // TODO: Реализовать сохранение результатов
+        showToast("Сохранение результатов...")
+
+        lifecycleScope.launch {
+            try {
+                // Здесь можно сохранить результаты в базу данных, файл или поделиться
+                val measurements = currentOriginalBitmap?.let {
+                    withContext(Dispatchers.IO) {
+                        imageProcessor.processCucumberImage(it).measurements
+                    }
+                }
+
+                if (measurements != null && measurements.error == null) {
+                    // Пример сохранения в SharedPreferences
+                    val prefs = getSharedPreferences("cucumber_results", MODE_PRIVATE)
+                    with(prefs.edit()) {
+                        putFloat("last_length", measurements.length)
+                        putFloat("last_diameter", measurements.diameter)
+                        putFloat("last_volume", measurements.volume)
+                        putLong("last_timestamp", System.currentTimeMillis())
+                        apply()
+                    }
+
+                    runOnUiThread {
+                        showToast("Результаты сохранены")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Error saving results", e)
+                runOnUiThread {
+                    showToast("Ошибка сохранения")
+                }
+            }
+        }
     }
 
     private fun showToast(message: String) {
