@@ -26,7 +26,7 @@ class ImageProcessorV2(private val context: Context) {
 
             if (bitmap.isRecycled) {
                 return ProcessedResult(
-                    MeasurementResult(0f, 0f, 0f, 0f,0f, "Изображение не доступно"),
+                    MeasurementResult(0f, 0f, 0f, 0f, 0f, "Изображение не доступно"),
                     null, null, null
                 )
             }
@@ -40,7 +40,7 @@ class ImageProcessorV2(private val context: Context) {
 
             if (compatibleBitmap == null) {
                 return ProcessedResult(
-                    MeasurementResult(0f, 0f, 0f, 0f, 0f,"Не удалось преобразовать изображение"),
+                    MeasurementResult(0f, 0f, 0f, 0f, 0f, "Не удалось преобразовать изображение"),
                     null, null, null
                 )
             }
@@ -48,7 +48,10 @@ class ImageProcessorV2(private val context: Context) {
             // 1. Конвертируем Bitmap в Mat
             val srcMat = Mat()
             Utils.bitmapToMat(compatibleBitmap, srcMat)
-            Log.d("ImageProcessor", "Размер srcMat: ${srcMat.width()}x${srcMat.height()}, каналы: ${srcMat.channels()}")
+            Log.d(
+                "ImageProcessor",
+                "Размер srcMat: ${srcMat.width()}x${srcMat.height()}, каналы: ${srcMat.channels()}"
+            )
 
             // 2. бинаризация
             val binary = convertToBinary(srcMat)
@@ -59,7 +62,7 @@ class ImageProcessorV2(private val context: Context) {
 
             if (paperRect.width <= 0 || paperRect.height <= 0) {
                 return ProcessedResult(
-                    MeasurementResult(0f, 0f, 0f, 0f, 0f,"Не удалось определить лист A4"),
+                    MeasurementResult(0f, 0f, 0f, 0f, 0f, "Не удалось определить лист A4"),
                     null, null, null
                 )
             }
@@ -77,7 +80,7 @@ class ImageProcessorV2(private val context: Context) {
             if (cucumberContour.empty()) {
                 val debugBitmap = createSimpleDebugBitmap(srcMat, paperRect)
                 return ProcessedResult(
-                    MeasurementResult(0f, 0f, 0f, 0f,0f,"Не удалось найти огурец"),
+                    MeasurementResult(0f, 0f, 0f, 0f, 0f, "Не удалось найти огурец"),
                     null, null, debugBitmap
                 )
             }
@@ -110,7 +113,7 @@ class ImageProcessorV2(private val context: Context) {
         } catch (e: Exception) {
             Log.e("ImageProcessor", "Ошибка обработки", e)
             ProcessedResult(
-                MeasurementResult(0f, 0f, 0f, 0f, 0f,"Ошибка обработки: ${e.localizedMessage}"),
+                MeasurementResult(0f, 0f, 0f, 0f, 0f, "Ошибка обработки: ${e.localizedMessage}"),
                 null, null, null
             )
         }
@@ -123,40 +126,21 @@ class ImageProcessorV2(private val context: Context) {
         return mask
     }
 
-    // === НОВАЯ ФУНКЦИЯ: Скелетизация ===
+
     private fun skeletonize(mask: Mat): Mat {
-        val skeleton = Mat.zeros(mask.size(), mask.type())
-        val temp = Mat()
-        val eroded = Mat()
+        // Преобразуем маску в бинарную (0/1)
+        val binary = Mat()
+        Imgproc.threshold(mask, binary, 127.0, 1.0, Imgproc.THRESH_BINARY)
 
-        val element = Imgproc.getStructuringElement(
-            Imgproc.MORPH_CROSS,
-            Size(3.0, 3.0)
-        )
+        // Применяем Zhang-Suen (реализация ниже)
+        val skeletonBinary = skeletonizeZhangSuen(binary)
 
-        var done = false
-
-        // Клонируем маску для работы
-        mask.copyTo(temp)
-
-        while (!done) {
-            // Эрозия
-            Imgproc.erode(temp, eroded, element)
-            // Дилатация
-            Imgproc.dilate(eroded, temp, element, Point(-1.0, -1.0), 1)
-            // Вычитание
-            Core.subtract(temp, eroded, temp)
-            // Объединение с скелетом
-            Core.bitwise_or(skeleton, temp, skeleton)
-            // Копируем эродированное изображение
-            eroded.copyTo(temp)
-
-            // Проверяем, остались ли белые пиксели
-            done = Core.countNonZero(temp) == 0
-        }
-
-        return skeleton
+        // Обратно в 0/255
+        val result = Mat()
+        Imgproc.threshold(skeletonBinary, result, 0.5, 255.0, Imgproc.THRESH_BINARY)
+        return result
     }
+
 
     // === НОВАЯ ФУНКЦИЯ: Расчет измерений с использованием скелета ===
     private fun calculateMeasurementsWithSkeleton(
@@ -196,198 +180,24 @@ class ImageProcessorV2(private val context: Context) {
 
         } catch (e: Exception) {
             Log.e("ImageProcessor", "Ошибка расчета измерений", e)
-            return MeasurementResult(0f, 0f, 0f, 0f,0f, "Ошибка расчета")
+            return MeasurementResult(0f, 0f, 0f, 0f, 0f, "Ошибка расчета")
         }
     }
 
     // === Расчет длины скелета ===
     private fun calculateSkeletonLength(skeleton: Mat): Float {
-        // Находим все точки скелета
-        val points = MatOfPoint()
-        Core.findNonZero(skeleton, points)
-
-        if (points.empty()) return 0f
-
-        val pointList = points.toList()
-
-        // Если точек мало, используем простое подсчет
-        if (pointList.size < 2) {
-            return Core.countNonZero(skeleton).toFloat()
-        }
-
-        // Ищем конечные точки скелета (точки с 1 соседом)
-        val endpoints = findEndpoints(skeleton)
-
-        if (endpoints.size >= 2) {
-            // Пытаемся найти самый длинный путь между конечными точками
-            return findLongestPathLength(skeleton, endpoints)
-        }
-
-        // Альтернатива: используем алгоритм для подсчета длины цепочки
-        return calculateChainLength(skeleton)
-    }
-
-    // === Поиск конечных точек скелета ===
-    private fun findEndpoints(skeleton: Mat): List<Point> {
-        val endpoints = mutableListOf<Point>()
-        val rows = skeleton.rows()
-        val cols = skeleton.cols()
-
-        for (y in 1 until rows - 1) {
-            for (x in 1 until cols - 1) {
+        val points = mutableListOf<Point>()
+        for (y in 0 until skeleton.rows()) {
+            for (x in 0 until skeleton.cols()) {
                 if (skeleton.get(y, x)[0] == 255.0) {
-                    var neighbors = 0
-
-                    // Проверяем 8-соседей
-                    for (dy in -1..1) {
-                        for (dx in -1..1) {
-                            if (dx == 0 && dy == 0) continue
-                            if (y + dy >= 0 && y + dy < rows &&
-                                x + dx >= 0 && x + dx < cols) {
-                                if (skeleton.get(y + dy, x + dx)[0] == 255.0) {
-                                    neighbors++
-                                }
-                            }
-                        }
-                    }
-
-                    // Конечная точка имеет только 1 соседа
-                    if (neighbors == 1) {
-                        endpoints.add(Point(x.toDouble(), y.toDouble()))
-                    }
+                    points.add(Point(x.toDouble(), y.toDouble()))
                 }
             }
         }
 
-        return endpoints
-    }
+        if (points.size < 2) return points.size.toFloat()
 
-    // === Поиск самой длинной цепочки ===
-    private fun findLongestPathLength(skeleton: Mat, endpoints: List<Point>): Float {
-        if (endpoints.size < 2) return 0f
-
-        var maxLength = 0f
-
-        // Для каждой пары конечных точек ищем путь
-        for (i in 0 until endpoints.size - 1) {
-            for (j in i + 1 until endpoints.size) {
-                val pathLength = findPathBetweenPoints(skeleton, endpoints[i], endpoints[j])
-                if (pathLength > maxLength) {
-                    maxLength = pathLength
-                }
-            }
-        }
-
-        return maxLength
-    }
-
-    // === Поиск пути между двумя точками ===
-    private fun findPathBetweenPoints(skeleton: Mat, start: Point, end: Point): Float {
-        val visited = Mat.zeros(skeleton.size(), CvType.CV_8UC1)
-        val queue = mutableListOf<Pair<Point, Float>>()
-        queue.add(Pair(start, 0f))
-
-        while (queue.isNotEmpty()) {
-            val (current, distance) = queue.removeAt(0)
-            val x = current.x.toInt()
-            val y = current.y.toInt()
-
-            // Помечаем как посещенную
-            visited.put(y, x, 255.0)
-
-            // Если достигли конечной точки
-            if (abs(current.x - end.x) < 1 && abs(current.y - end.y) < 1) {
-                return distance
-            }
-
-            // Проверяем 4-соседей
-            val neighbors = listOf(
-                Point(x + 1.toDouble(), y.toDouble()), Point(x - 1.toDouble(), y.toDouble()),
-                Point(x.toDouble(), y + 1.toDouble()), Point(x.toDouble(), y - 1.toDouble())
-            )
-
-            for (neighbor in neighbors) {
-                val nx = neighbor.x.toInt()
-                val ny = neighbor.y.toInt()
-
-                if (nx >= 0 && nx < skeleton.cols() &&
-                    ny >= 0 && ny < skeleton.rows()) {
-
-                    if (skeleton.get(ny, nx)[0] == 255.0 &&
-                        visited.get(ny, nx)[0] == 0.0) {
-
-                        val newDistance = distance + 1f
-                        queue.add(Pair(neighbor, newDistance))
-                    }
-                }
-            }
-        }
-
-        return 0f
-    }
-
-    // === Альтернативный расчет длины цепочки ===
-    private fun calculateChainLength(skeleton: Mat): Float {
-        var length = 0f
-
-        // Используем алгоритм следования по цепочке
-        val points = MatOfPoint()
-        Core.findNonZero(skeleton, points)
-
-        if (points.empty()) return 0f
-
-        // Создаем копию для отметки посещенных точек
-        val visited = Mat.zeros(skeleton.size(), CvType.CV_8UC1)
-
-        // Начинаем с любой точки
-        val startPoint = points.toList().firstOrNull() ?: return 0f
-
-        var current = startPoint
-        var hasNext = true
-
-        while (hasNext) {
-            val x = current.x.toInt()
-            val y = current.y.toInt()
-
-            // Отмечаем как посещенную
-            visited.put(y, x, 255.0)
-
-            // Ищем следующую точку
-            var nextPoint: Point? = null
-
-            // Проверяем 8-соседей
-            for (dy in -1..1) {
-                for (dx in -1..1) {
-                    if (dx == 0 && dy == 0) continue
-
-                    val nx = x + dx
-                    val ny = y + dy
-
-                    if (nx >= 0 && nx < skeleton.cols() &&
-                        ny >= 0 && ny < skeleton.rows()) {
-
-                        if (skeleton.get(ny, nx)[0] == 255.0 &&
-                            visited.get(ny, nx)[0] == 0.0) {
-
-                            // Учитываем диагональное расстояние
-                            val dist = if (dx != 0 && dy != 0) sqrt(2.0) else 1.0
-                            length += dist.toFloat()
-                            nextPoint = Point(nx.toDouble(), ny.toDouble())
-                            break
-                        }
-                    }
-                }
-                if (nextPoint != null) break
-            }
-
-            if (nextPoint != null) {
-                current = nextPoint
-            } else {
-                hasNext = false
-            }
-        }
-
-        return length
+        return Core.countNonZero(skeleton).toFloat() * 0.9f
     }
 
     // === Расчет кривизны ===
@@ -420,7 +230,7 @@ class ImageProcessorV2(private val context: Context) {
 
             if (norm1 > 0 && norm2 > 0) {
                 val cosAngle = dot / (norm1 * norm2)
-                val angle = Math.acos(cosAngle.coerceIn(-1.0, 1.0))
+                val angle = acos(cosAngle.coerceIn(-1.0, 1.0))
                 totalCurvature += angle
                 count++
             }
@@ -559,7 +369,13 @@ class ImageProcessorV2(private val context: Context) {
     private fun detectSheet(image: Mat): Rect {
         val contours = ArrayList<MatOfPoint>()
         val hierarchy = Mat()
-        Imgproc.findContours(image.clone(), contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
+        Imgproc.findContours(
+            image.clone(),
+            contours,
+            hierarchy,
+            Imgproc.RETR_LIST,
+            Imgproc.CHAIN_APPROX_SIMPLE
+        )
 
         var bestContour: MatOfPoint? = null
         var maxArea = 0.0
@@ -605,7 +421,13 @@ class ImageProcessorV2(private val context: Context) {
 
             val contours = mutableListOf<MatOfPoint>()
             val hierarchy = Mat()
-            Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+            Imgproc.findContours(
+                mask,
+                contours,
+                hierarchy,
+                Imgproc.RETR_EXTERNAL,
+                Imgproc.CHAIN_APPROX_SIMPLE
+            )
 
             if (contours.isEmpty()) return MatOfPoint()
 
@@ -668,6 +490,112 @@ class ImageProcessorV2(private val context: Context) {
 
         Utils.matToBitmap(resultMat, resultBitmap)
         return resultBitmap
+    }
+
+    /**
+     * Скелетизация бинарного изображения по алгоритму Zhang-Suen
+     * Вход: бинарная маска (0 и 255), где 255 = объект
+     * Выход: скелет (0 и 255)
+     */
+    fun skeletonizeZhangSuen(input: Mat): Mat {
+        // Преобразуем 255 → 1 для удобства вычислений
+        val binary = Mat()
+        Core.compare(input, Scalar(0.0), binary, Core.CMP_GT) // >0 → 255
+        Imgproc.threshold(binary, binary, 127.0, 1.0, Imgproc.THRESH_BINARY) // теперь 0/1
+
+        val rows = binary.rows()
+        val cols = binary.cols()
+        var current = binary.toByteArray()
+        var changed = true
+
+        while (changed) {
+            changed = false
+            val next = current.clone()
+
+            // Этап 1
+            for (i in 1 until rows - 1) {
+                for (j in 1 until cols - 1) {
+                    if (current[i * cols + j] == 1.toByte()) {
+                        val neighbors = get8Neighbors(current, i, j, cols)
+                        val sum = neighbors.sumOf { it.toInt() }
+                        if (sum in 2..6 && countTransitions(neighbors) == 1) {
+                            val p2 = neighbors[0].toInt()
+                            val p4 = neighbors[2].toInt()
+                            val p6 = neighbors[4].toInt()
+                            val p8 = neighbors[6].toInt()
+                            if (p2 * p4 * p6 == 0 && p4 * p6 * p8 == 0) {
+                                next[i * cols + j] = 0
+                                changed = true
+                            }
+                        }
+                    }
+                }
+            }
+            current = next
+
+            // Этап 2
+            val next2 = current.clone()
+            for (i in 1 until rows - 1) {
+                for (j in 1 until cols - 1) {
+                    if (current[i * cols + j] == 1.toByte()) {
+                        val neighbors = get8Neighbors(current, i, j, cols)
+                        val sum = neighbors.sumOf { it.toInt() }
+                        if (sum in 2..6 && countTransitions(neighbors) == 1) {
+                            val p2 = neighbors[0].toInt()
+                            val p4 = neighbors[2].toInt()
+                            val p6 = neighbors[4].toInt()
+                            val p8 = neighbors[6].toInt()
+                            if (p2 * p4 * p8 == 0 && p2 * p6 * p8 == 0) {
+                                next2[i * cols + j] = 0
+                                changed = true
+                            }
+                        }
+                    }
+                }
+            }
+            current = next2
+        }
+
+        // Обратно: 1 → 255
+        val result =
+            current.map { if (it == 1.toByte()) 255.toByte() else 0.toByte() }.toByteArray()
+        return result.toMat(rows, cols)
+    }
+
+    // Копия Mat как массив байтов (удобно для обработки)
+    fun Mat.toByteArray(): ByteArray {
+        val data = ByteArray(this.rows() * this.cols())
+        this.get(0, 0, data)
+        return data
+    }
+
+    fun ByteArray.toMat(rows: Int, cols: Int): Mat {
+        val mat = Mat(rows, cols, CvType.CV_8UC1)
+        mat.put(0, 0, this)
+        return mat
+    }
+
+    private fun get8Neighbors(data: ByteArray, i: Int, j: Int, cols: Int): List<Byte> {
+        return listOf(
+            data[(i - 1) * cols + j],     // p2
+            data[(i - 1) * cols + j + 1], // p3
+            data[i * cols + j + 1],       // p4
+            data[(i + 1) * cols + j + 1], // p5
+            data[(i + 1) * cols + j],     // p6
+            data[(i + 1) * cols + j - 1], // p7
+            data[i * cols + j - 1],       // p8
+            data[(i - 1) * cols + j - 1]  // p9 (== p1)
+        )
+    }
+
+    private fun countTransitions(neighbors: List<Byte>): Int {
+        // Считаем переходы 0→1 в последовательности p2,p3,...,p9,p2
+        var count = 0
+        val seq = neighbors + neighbors[0] // замыкаем цикл
+        for (i in 0 until 8) {
+            if (seq[i] == 0.toByte() && seq[i + 1] == 1.toByte()) count++
+        }
+        return count
     }
 
     fun drawTextOnMat(mat: Mat, text: String, point: Point, textSizeZ: Float, color: Scalar) {
