@@ -12,6 +12,7 @@ data class MeasurementResult(
     val width: Float,         // Ширина в мм
     val diameter: Float,      // Диаметр в мм (средний)
     val volume: Float,        // Объем в мм³
+    val curve: Float = 0f,         // Кривизна
     val error: String? = null // Сообщение об ошибке, если есть
 )
 
